@@ -1,3 +1,17 @@
+# Copyright 2012 Mozilla Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json, platform, os, shutil, sys, subprocess, tempfile, threading, time, urllib, urllib2, hashlib
 from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
 import SocketServer
@@ -500,7 +514,7 @@ def check(task, results, browser, masterMode):
         return
 
     kind = task['type']
-    if 'eq' == kind:
+    if 'eq' == kind or 'text' == kind:
         checkEq(task, results, browser, masterMode)
     elif 'fbf' == kind:
         checkFBF(task, results, browser)
@@ -514,6 +528,7 @@ def checkEq(task, results, browser, masterMode):
     pfx = os.path.join(REFDIR, sys.platform, browser, task['id'])
     results = results[0]
     taskId = task['id']
+    taskType = task['type']
 
     passed = True
     for page in xrange(len(results)):
@@ -533,7 +548,7 @@ def checkEq(task, results, browser, masterMode):
 
             eq = (ref == snapshot)
             if not eq:
-                print 'TEST-UNEXPECTED-FAIL | eq', taskId, '| in', browser, '| rendering of page', page + 1, '!= reference rendering'
+                print 'TEST-UNEXPECTED-FAIL | ', taskType, taskId, '| in', browser, '| rendering of page', page + 1, '!= reference rendering'
 
                 if not State.eqLog:
                     State.eqLog = open(EQLOG_FILE, 'w')
@@ -562,7 +577,7 @@ def checkEq(task, results, browser, masterMode):
             of.close()
 
     if passed:
-        print 'TEST-PASS | eq test', task['id'], '| in', browser
+        print 'TEST-PASS | ', taskType, ' test', task['id'], '| in', browser
 
 def checkFBF(task, results, browser):
     round0, round1 = results[0], results[1]

@@ -1,5 +1,19 @@
 /* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
+/* Copyright 2012 Mozilla Foundation
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 'use strict';
 
@@ -33,7 +47,7 @@ var PDFImage = (function PDFImageClosure() {
     // Clamp the value to the range
     return value < 0 ? 0 : value > max ? max : value;
   }
-  function PDFImage(xref, res, image, inline, smask) {
+  function PDFImage(xref, res, image, inline, smask, mask) {
     this.image = image;
     if (image.getParams) {
       // JPX/JPEG2000 streams directly contain bits per component
@@ -94,12 +108,15 @@ var PDFImage = (function PDFImageClosure() {
       }
     }
 
-    var mask = dict.get('Mask');
-
-    if (mask) {
-      TODO('masked images');
-    } else if (smask) {
+    if (smask) {
       this.smask = new PDFImage(xref, res, smask, false);
+    } else if (mask) {
+      if (isStream(mask)) {
+        this.mask = new PDFImage(xref, res, mask, false);
+      } else {
+        // Color key mask (just an array).
+        this.mask = mask;
+      }
     }
   }
   /**
@@ -110,21 +127,40 @@ var PDFImage = (function PDFImageClosure() {
                                                      res, image, inline) {
     var imageDataPromise = new Promise();
     var smaskPromise = new Promise();
+    var maskPromise = new Promise();
     // The image data and smask data may not be ready yet, wait till both are
     // resolved.
-    Promise.all([imageDataPromise, smaskPromise]).then(function(results) {
-      var imageData = results[0], smaskData = results[1];
-      var image = new PDFImage(xref, res, imageData, inline, smaskData);
+    Promise.all([imageDataPromise, smaskPromise, maskPromise]).then(
+        function(results) {
+      var imageData = results[0], smaskData = results[1], maskData = results[2];
+      var image = new PDFImage(xref, res, imageData, inline, smaskData,
+                               maskData);
       callback(image);
     });
 
     handleImageData(handler, xref, res, image, imageDataPromise);
 
     var smask = image.dict.get('SMask');
-    if (smask)
+    var mask = image.dict.get('Mask');
+
+    if (smask) {
       handleImageData(handler, xref, res, smask, smaskPromise);
-    else
+      maskPromise.resolve(null);
+    } else {
       smaskPromise.resolve(null);
+      if (mask) {
+        if (isStream(mask)) {
+          handleImageData(handler, xref, res, mask, maskPromise);
+        } else if (isArray(mask)) {
+          maskPromise.resolve(mask);
+        } else {
+          warn('Unsupported mask format.');
+          maskPromise.resolve(null);
+        }
+      } else {
+        maskPromise.resolve(null);
+      }
+    }
   };
 
   /**
@@ -266,8 +302,9 @@ var PDFImage = (function PDFImageClosure() {
       }
       return output;
     },
-    getOpacity: function PDFImage_getOpacity(width, height) {
+    getOpacity: function PDFImage_getOpacity(width, height, image) {
       var smask = this.smask;
+      var mask = this.mask;
       var originalWidth = this.width;
       var originalHeight = this.height;
       var buf;
@@ -278,7 +315,42 @@ var PDFImage = (function PDFImageClosure() {
         buf = new Uint8Array(sw * sh);
         smask.fillGrayBuffer(buf);
         if (sw != width || sh != height)
-          buf = PDFImage.resize(buf, smask.bps, 1, sw, sh, width, height);
+          buf = PDFImage.resize(buf, smask.bpc, 1, sw, sh, width, height);
+      } else if (mask) {
+        if (mask instanceof PDFImage) {
+          var sw = mask.width;
+          var sh = mask.height;
+          buf = new Uint8Array(sw * sh);
+          mask.numComps = 1;
+          mask.fillGrayBuffer(buf);
+
+          // Need to invert values in buffer
+          for (var i = 0, ii = sw * sh; i < ii; ++i)
+            buf[i] = 255 - buf[i];
+
+          if (sw != width || sh != height)
+            buf = PDFImage.resize(buf, mask.bpc, 1, sw, sh, width, height);
+        } else if (isArray(mask)) {
+          // Color key mask: if any of the compontents are outside the range
+          // then they should be painted.
+          buf = new Uint8Array(width * height);
+          var numComps = this.numComps;
+          for (var i = 0, ii = width * height; i < ii; ++i) {
+            var opacity = 0;
+            var imageOffset = i * numComps;
+            for (var j = 0; j < numComps; ++j) {
+              var color = image[imageOffset + j];
+              var maskOffset = j * 2;
+              if (color < mask[maskOffset] || color > mask[maskOffset + 1]) {
+                opacity = 255;
+                break;
+              }
+            }
+            buf[i] = opacity;
+          }
+        } else {
+          error('Unknown mask format.');
+        }
       } else {
         buf = new Uint8Array(width * height);
         for (var i = 0, ii = width * height; i < ii; ++i)
@@ -320,15 +392,19 @@ var PDFImage = (function PDFImageClosure() {
       var rowBytes = (originalWidth * numComps * bpc + 7) >> 3;
       var imgArray = this.getImageBytes(originalHeight * rowBytes);
 
+      // imgArray can be incomplete (e.g. after CCITT fax encoding)
+      var actualHeight = 0 | (imgArray.length / rowBytes *
+                         height / originalHeight);
+
       var comps = this.colorSpace.getRgbBuffer(
         this.getComponents(imgArray), bpc);
       if (originalWidth != width || originalHeight != height)
         comps = PDFImage.resize(comps, this.bpc, 3, originalWidth,
                                 originalHeight, width, height);
       var compsPos = 0;
-      var opacity = this.getOpacity(width, height);
+      var opacity = this.getOpacity(width, height, imgArray);
       var opacityPos = 0;
-      var length = width * height * 4;
+      var length = width * actualHeight * 4;
 
       for (var i = 0; i < length; i += 4) {
         buffer[i] = comps[compsPos++];

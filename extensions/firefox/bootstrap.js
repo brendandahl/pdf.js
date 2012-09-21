@@ -1,5 +1,19 @@
 /* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
+/* Copyright 2012 Mozilla Foundation
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 'use strict';
 
@@ -11,6 +25,7 @@ let Ci = Components.interfaces;
 let Cm = Components.manager;
 let Cu = Components.utils;
 
+Cu.import('resource://gre/modules/XPCOMUtils.jsm');
 Cu.import('resource://gre/modules/Services.jsm');
 
 function getBoolPref(pref, def) {
@@ -34,35 +49,37 @@ function log(str) {
   dump(str + '\n');
 }
 
-// Register/unregister a class as a component.
+// Register/unregister a constructor as a component.
 let Factory = {
-  registrar: null,
-  aClass: null,
-  register: function(aClass) {
-    if (this.aClass) {
-      log('Cannot register more than one class');
-      return;
-    }
-    this.registrar = Cm.QueryInterface(Ci.nsIComponentRegistrar);
-    this.aClass = aClass;
-    var proto = aClass.prototype;
-    this.registrar.registerFactory(proto.classID, proto.classDescription,
-      proto.contractID, this);
+  QueryInterface: XPCOMUtils.generateQI([Ci.nsIFactory]),
+  _targetConstructor: null,
+
+  register: function register(targetConstructor) {
+    this._targetConstructor = targetConstructor;
+    var proto = targetConstructor.prototype;
+    var registrar = Cm.QueryInterface(Ci.nsIComponentRegistrar);
+    registrar.registerFactory(proto.classID, proto.classDescription,
+                              proto.contractID, this);
   },
-  unregister: function() {
-    if (!this.aClass) {
-      log('Class was never registered.');
-      return;
-    }
-    var proto = this.aClass.prototype;
-    this.registrar.unregisterFactory(proto.classID, this);
-    this.aClass = null;
+
+  unregister: function unregister() {
+    var proto = this._targetConstructor.prototype;
+    var registrar = Cm.QueryInterface(Ci.nsIComponentRegistrar);
+    registrar.unregisterFactory(proto.classID, this);
+    this._targetConstructor = null;
   },
-  // nsIFactory::createInstance
-  createInstance: function(outer, iid) {
-    if (outer !== null)
+
+  // nsIFactory
+  createInstance: function createInstance(aOuter, iid) {
+    if (aOuter !== null)
       throw Cr.NS_ERROR_NO_AGGREGATION;
-    return (new (this.aClass)).QueryInterface(iid);
+    return (new (this._targetConstructor)).QueryInterface(iid);
+  },
+
+  // nsIFactory
+  lockFactory: function lockFactory(lock) {
+    // No longer used as of gecko 1.7.
+    throw Cr.NS_ERROR_NOT_IMPLEMENTED;
   }
 };
 

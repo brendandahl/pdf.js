@@ -1,5 +1,19 @@
 /* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
+/* Copyright 2012 Mozilla Foundation
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 'use strict';
 
@@ -254,9 +268,9 @@ var JpxImage = (function JpxImageClosure() {
                   cod.selectiveArithmeticCodingBypass ||
                   cod.resetContextProbabilities ||
                   cod.terminationOnEachCodingPass ||
-                  cod.verticalyStripe || cod.predictableTermination ||
-                  cod.segmentationSymbolUsed)
-                throw 'Unsupported COD options: ' + uneval(cod);
+                  cod.verticalyStripe || cod.predictableTermination)
+                throw 'Unsupported COD options: ' +
+                  globalScope.JSON.stringify(cod);
 
               if (context.mainHeader)
                 context.COD = cod;
@@ -832,7 +846,8 @@ var JpxImage = (function JpxImageClosure() {
     return position;
   }
   function copyCoefficients(coefficients, x0, y0, width, height,
-                            delta, mb, codeblocks, transformation) {
+                            delta, mb, codeblocks, transformation,
+                            segmentationSymbolUsed) {
     var r = 0.5; // formula (E-6)
     for (var i = 0, ii = codeblocks.length; i < ii; ++i) {
       var codeblock = codeblocks[i];
@@ -876,6 +891,8 @@ var JpxImage = (function JpxImageClosure() {
             break;
           case 2:
             bitModel.runCleanupPass();
+            if (segmentationSymbolUsed)
+              bitModel.checkSegmentationSymbol();
             break;
         }
         currentCodingpassType = (currentCodingpassType + 1) % 3;
@@ -912,6 +929,7 @@ var JpxImage = (function JpxImageClosure() {
     var scalarExpounded = quantizationParameters.scalarExpounded;
     var guardBits = quantizationParameters.guardBits;
     var transformation = codingStyleParameters.transformation;
+    var segmentationSymbolUsed = codingStyleParameters.segmentationSymbolUsed;
     var precision = context.components[c].precision;
 
     var subbandCoefficients = [];
@@ -942,7 +960,8 @@ var JpxImage = (function JpxImageClosure() {
 
         var coefficients = new Float32Array(width * height);
         copyCoefficients(coefficients, subband.tbx0, subband.tby0,
-          width, height, delta, mb, subband.codeblocks, transformation);
+          width, height, delta, mb, subband.codeblocks, transformation,
+          segmentationSymbolUsed);
 
         subbandCoefficients.push({
           width: width,
@@ -1645,6 +1664,14 @@ var JpxImage = (function JpxImageClosure() {
             }
           }
         }
+      },
+      checkSegmentationSymbol: function BitModel_checkSegmentationSymbol() {
+        var decoder = this.decoder;
+        var cx = this.uniformContext;
+        var symbol = (decoder.readBit(cx) << 3) | (decoder.readBit(cx) << 2) |
+                     (decoder.readBit(cx) << 1) | decoder.readBit(cx);
+        if (symbol != 0xA)
+          throw 'Invalid segmentation symbol';
       }
     };
 

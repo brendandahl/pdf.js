@@ -1,5 +1,19 @@
 /* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
+/* Copyright 2012 Mozilla Foundation
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 'use strict';
 
@@ -157,6 +171,7 @@ var CanvasExtraState = (function CanvasExtraStateClosure() {
     this.wordSpacing = 0;
     this.textHScale = 1;
     this.textRenderingMode = TextRenderingMode.FILL;
+    this.textRise = 0;
     // Color spaces
     this.fillColorSpace = new DeviceGrayCS();
     this.fillColorSpaceObj = null;
@@ -581,8 +596,7 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
                                  (fontObj.bold ? 'bold' : 'normal');
 
       var italic = fontObj.italic ? 'italic' : 'normal';
-      var serif = fontObj.isSerifFont ? 'serif' : 'sans-serif';
-      var typeface = '"' + name + '", ' + serif;
+      var typeface = '"' + name + '", ' + fontObj.fallbackName;
 
       // Some font backends cannot handle fonts below certain size.
       // Keeping the font at minimal size and using the fontSizeScale to change
@@ -601,7 +615,7 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
       this.current.textRenderingMode = mode;
     },
     setTextRise: function CanvasGraphics_setTextRise(rise) {
-      TODO('text rise: ' + rise);
+      this.current.textRise = rise;
     },
     moveText: function CanvasGraphics_moveText(x, y) {
       this.current.x = this.current.lineX += x;
@@ -628,7 +642,7 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
 
       ctx.transform.apply(ctx, current.textMatrix);
       ctx.scale(1, -1);
-      ctx.translate(current.x, -1 * current.y);
+      ctx.translate(current.x, -current.y - current.textRise);
       ctx.transform.apply(ctx, fontMatrix);
       ctx.scale(textHScale, 1);
     },
@@ -687,6 +701,7 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
           if (glyph === null) {
             // word break
             this.ctx.translate(wordSpacing, 0);
+            current.x += wordSpacing * textHScale;
             continue;
           }
 
@@ -767,15 +782,9 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
           x += charWidth;
 
           var glyphUnicode = glyph.unicode === ' ' ? '\u00A0' : glyph.unicode;
-          var glyphUnicodeLength = glyphUnicode.length;
-          //reverse an arabic ligature
-          if (glyphUnicodeLength > 1 &&
-              isRTLRangeFor(glyphUnicode.charCodeAt(0))) {
-            for (var ii = glyphUnicodeLength - 1; ii >= 0; ii--)
-              text.str += glyphUnicode[ii];
-          } else
-            text.str += glyphUnicode;
-          text.length += glyphUnicodeLength;
+          if (glyphUnicode in NormalizedUnicodes)
+            glyphUnicode = NormalizedUnicodes[glyphUnicode];
+          text.str += reverseIfRtl(glyphUnicode);
           text.canvasWidth += charWidth;
         }
         current.x += x * textHScale2;
@@ -783,7 +792,7 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
       }
 
       if (textSelection)
-        this.textLayer.appendText(text, font.loadedName, fontSize);
+        this.textLayer.appendText(text, font.fallbackName, fontSize);
 
       return text;
     },
@@ -827,7 +836,6 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
               var numFakeSpaces = Math.round(-e / text.geom.spaceWidth);
               if (numFakeSpaces > 0) {
                 text.str += '\u00A0';
-                text.length++;
               }
             }
           }
@@ -841,7 +849,6 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
               text.str += shownText.str;
             }
             text.canvasWidth += shownText.canvasWidth;
-            text.length += shownText.length;
           }
         } else {
           error('TJ array element ' + e + ' is not string or num');
@@ -849,7 +856,7 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
       }
 
       if (textSelection)
-        this.textLayer.appendText(text, font.loadedName, fontSize);
+        this.textLayer.appendText(text, font.fallbackName, fontSize);
     },
     nextLineShowText: function CanvasGraphics_nextLineShowText(text) {
       this.nextLine();
@@ -1097,6 +1104,40 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
           }
         }
       }
+      function rescaleImage(pixels, widthScale, heightScale) {
+        var scaledWidth = Math.ceil(width / widthScale);
+        var scaledHeight = Math.ceil(height / heightScale);
+
+        var itemsSum = new Uint32Array(scaledWidth * scaledHeight * 4);
+        var itemsCount = new Uint32Array(scaledWidth * scaledHeight);
+        for (var i = 0, position = 0; i < height; i++) {
+          var lineOffset = (0 | (i / heightScale)) * scaledWidth;
+          for (var j = 0; j < width; j++) {
+            var countOffset = lineOffset + (0 | (j / widthScale));
+            var sumOffset = countOffset << 2;
+            itemsSum[sumOffset] += pixels[position];
+            itemsSum[sumOffset + 1] += pixels[position + 1];
+            itemsSum[sumOffset + 2] += pixels[position + 2];
+            itemsSum[sumOffset + 3] += pixels[position + 3];
+            itemsCount[countOffset]++;
+            position += 4;
+          }
+        }
+        var tmpCanvas = createScratchCanvas(scaledWidth, scaledHeight);
+        var tmpCtx = tmpCanvas.getContext('2d');
+        var imgData = tmpCtx.getImageData(0, 0, scaledWidth, scaledHeight);
+        pixels = imgData.data;
+        for (var i = 0, j = 0, ii = scaledWidth * scaledHeight; i < ii; i++) {
+          var count = itemsCount[i];
+          pixels[j] = itemsSum[j] / count;
+          pixels[j + 1] = itemsSum[j + 1] / count;
+          pixels[j + 2] = itemsSum[j + 2] / count;
+          pixels[j + 3] = itemsSum[j + 3] / count;
+          j += 4;
+        }
+        tmpCtx.putImageData(imgData, 0, 0);
+        return tmpCanvas;
+      }
 
       this.save();
 
@@ -1119,8 +1160,19 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
 
       applyStencilMask(pixels, inverseDecode);
 
-      tmpCtx.putImageData(imgData, 0, 0);
-      ctx.drawImage(tmpCanvas, 0, -h);
+      var currentTransform = ctx.mozCurrentTransformInverse;
+      var widthScale = Math.max(Math.abs(currentTransform[0]), 1);
+      var heightScale = Math.max(Math.abs(currentTransform[3]), 1);
+      if (widthScale >= 2 || heightScale >= 2) {
+        // canvas does not resize well large images to small -- using simple
+        // algorithm to perform pre-scaling
+        tmpCanvas = rescaleImage(imgData.data, widthScale, heightScale);
+        ctx.scale(widthScale, heightScale);
+        ctx.drawImage(tmpCanvas, 0, -h / heightScale);
+      } else {
+        tmpCtx.putImageData(imgData, 0, 0);
+        ctx.drawImage(tmpCanvas, 0, -h);
+      }
       this.restore();
     },
 
@@ -1151,20 +1203,20 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
     // Marked content
 
     markPoint: function CanvasGraphics_markPoint(tag) {
-      TODO('Marked content');
+      // TODO Marked content.
     },
     markPointProps: function CanvasGraphics_markPointProps(tag, properties) {
-      TODO('Marked content');
+      // TODO Marked content.
     },
     beginMarkedContent: function CanvasGraphics_beginMarkedContent(tag) {
-      TODO('Marked content');
+      // TODO Marked content.
     },
     beginMarkedContentProps: function CanvasGraphics_beginMarkedContentProps(
                                         tag, properties) {
-      TODO('Marked content');
+      // TODO Marked content.
     },
     endMarkedContent: function CanvasGraphics_endMarkedContent() {
-      TODO('Marked content');
+      // TODO Marked content.
     },
 
     // Compatibility
@@ -1212,7 +1264,7 @@ var CanvasGraphics = (function CanvasGraphicsClosure() {
   return CanvasGraphics;
 })();
 
-if (!isWorker) {
+function checkPutBinaryImageDataCompatibility() {
   // Feature detection if the browser can use an Uint8Array directly as imgData.
   var canvas = document.createElement('canvas');
   canvas.width = 1;
@@ -1233,17 +1285,23 @@ if (!isWorker) {
   } catch (e) {
     CanvasGraphics.prototype.putBinaryImageData =
       function CanvasGraphicsPutBinaryImageDataShim(ctx, imgData, w, h) {
-        var tmpImgData = ctx.getImageData(0, 0, w, h);
+        var tmpImgData = 'createImageData' in ctx ? ctx.createImageData(w, h) :
+          ctx.getImageData(0, 0, w, h);
 
-        // Copy over the imageData pixel by pixel.
         var tmpImgDataPixels = tmpImgData.data;
-        var len = tmpImgDataPixels.length;
-
-        while (len--) {
-          tmpImgDataPixels[len] = imgData.data[len];
+        var data = imgData.data;
+        if ('set' in tmpImgDataPixels)
+          tmpImgDataPixels.set(data);
+        else {
+          // Copy over the imageData pixel by pixel.
+          for (var i = 0, ii = tmpImgDataPixels.length; i < ii; i++)
+            tmpImgDataPixels[i] = data[i];
         }
 
         ctx.putImageData(tmpImgData, 0, 0);
       };
   }
+}
+if (!isWorker) {
+  checkPutBinaryImageDataCompatibility();
 }

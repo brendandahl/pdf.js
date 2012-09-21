@@ -1,11 +1,35 @@
 /* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
+/* Copyright 2012 Mozilla Foundation
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 'use strict';
 
 // Checking if the typed arrays are supported
 (function checkTypedArrayCompatibility() {
   if (typeof Uint8Array !== 'undefined') {
+    // some mobile versions do not support subarray (e.g. safari 5 / iOS)
+    if (typeof Uint8Array.prototype.subarray === 'undefined') {
+        Uint8Array.prototype.subarray = function subarray(start, end) {
+          return new Uint8Array(this.slice(start, end));
+        };
+        Float32Array.prototype.subarray = function subarray(start, end) {
+          return new Float32Array(this.slice(start, end));
+        };
+    }
+
     // some mobile version might not support Float64Array
     if (typeof Float64Array === 'undefined')
       window.Float64Array = Float32Array;
@@ -69,8 +93,17 @@
 
 // Object.defineProperty() ?
 (function checkObjectDefinePropertyCompatibility() {
-  if (typeof Object.defineProperty !== 'undefined')
-    return;
+  if (typeof Object.defineProperty !== 'undefined') {
+    // some browsers (e.g. safari) cannot use defineProperty() on DOM objects
+    // and thus the native version is not sufficient
+    var definePropertyPossible = true;
+    try {
+      Object.defineProperty(new Image(), 'id', { value: 'test' });
+    } catch (e) {
+      definePropertyPossible = false;
+    }
+    if (definePropertyPossible) return;
+  }
 
   Object.defineProperty = function objectDefineProperty(obj, name, def) {
     delete obj[name];
@@ -105,23 +138,62 @@
   };
 })();
 
+// No readAsArrayBuffer ?
+(function checkFileReaderReadAsArrayBuffer() {
+  if (typeof FileReader === 'undefined')
+    return; // FileReader is not implemented
+  var frPrototype = FileReader.prototype;
+  // Older versions of Firefox might not have readAsArrayBuffer
+  if ('readAsArrayBuffer' in frPrototype)
+    return; // readAsArrayBuffer is implemented
+  Object.defineProperty(frPrototype, 'readAsArrayBuffer', {
+    value: function fileReaderReadAsArrayBuffer(blob) {
+      var fileReader = new FileReader();
+      var originalReader = this;
+      fileReader.onload = function fileReaderOnload(evt) {
+        var data = evt.target.result;
+        var buffer = new ArrayBuffer(data.length);
+        var uint8Array = new Uint8Array(buffer);
+
+        for (var i = 0, ii = data.length; i < ii; i++)
+          uint8Array[i] = data.charCodeAt(i);
+
+        Object.defineProperty(originalReader, 'result', {
+          value: buffer,
+          enumerable: true,
+          writable: false,
+          configurable: true
+        });
+
+        var event = document.createEvent('HTMLEvents');
+        event.initEvent('load', false, false);
+        originalReader.dispatchEvent(event);
+      };
+      fileReader.readAsBinaryString(blob);
+    }
+  });
+})();
+
 // No XMLHttpRequest.response ?
 (function checkXMLHttpRequestResponseCompatibility() {
   var xhrPrototype = XMLHttpRequest.prototype;
+  if (!('overrideMimeType' in xhrPrototype)) {
+    // IE10 might have response, but not overrideMimeType
+    Object.defineProperty(xhrPrototype, 'overrideMimeType', {
+      value: function xmlHttpRequestOverrideMimeType(mimeType) {}
+    });
+  }
   if ('response' in xhrPrototype ||
       'mozResponseArrayBuffer' in xhrPrototype ||
       'mozResponse' in xhrPrototype ||
       'responseArrayBuffer' in xhrPrototype)
     return;
-  // IE ?
+  // IE9 ?
   if (typeof VBArray !== 'undefined') {
     Object.defineProperty(xhrPrototype, 'response', {
       get: function xmlHttpRequestResponseGet() {
         return new Uint8Array(new VBArray(this.responseBody).toArray());
       }
-    });
-    Object.defineProperty(xhrPrototype, 'overrideMimeType', {
-      value: function xmlHttpRequestOverrideMimeType(mimeType) {}
     });
     return;
   }
@@ -186,9 +258,10 @@
   };
 })();
 
-// IE9 text/html data URI
-(function checkDocumentDocumentModeCompatibility() {
-  if (!('documentMode' in document) || document.documentMode !== 9)
+// IE9/10 text/html data URI
+(function checkDataURICompatibility() {
+  if (!('documentMode' in document) ||
+      document.documentMode !== 9 && document.documentMode !== 10)
     return;
   // overriding the src property
   var originalSrcDescriptor = Object.getOwnPropertyDescriptor(
