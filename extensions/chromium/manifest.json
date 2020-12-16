@@ -57,13 +57,14 @@
   },
   "incognito": "split",
   "web_accessible_resources": [
-    "getFrameId",
     "content/web/viewer.html",
     "http:/*",
     "https:/*",
     "ftp:/*",
     "file:/*",
     "chrome-extension:/*",
+    "blob:*",
+    "data:*",
     "filesystem:/*",
     "drive:*"
   ]
